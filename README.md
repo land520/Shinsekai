@@ -55,7 +55,7 @@ git clone https://github.com/RachelForster/Shinsekai
 cd Shinsekai
 ```
 
-**整合包：** 从 [Releases](https://github.com/RachelForster/Shinsekai/releases) 下载解压；内置 `install.bat` / `start.bat`。
+**整合包：** 从 [Releases] 下载解压；内置 `install.bat` / `start.bat`。
 
 ### 2. 安装依赖
 
