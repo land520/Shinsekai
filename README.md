@@ -15,7 +15,7 @@
 - **模型不仅会聊天**：内置/插件 **LLM 工具**（如角色与世界书相关能力）+ **MCP** 接入外部服务，把检索、自动化等能力收进同一次对话。  
 - **可扩展、可换肤**：**插件 SDK** 扩展适配器与设置页、聊天栏控件；主题与聊天窗样式可通过配置与插件微调（如 `chat_ui_theme`）。  
 - **数据在本地、可备份**：配置与资源默认落在项目 **`data/`** 下（`api.yaml`、`system_config.yaml`、角色与历史等），便于打包备份与二次开发。  
-- **开源可玩**：源码与 [发行版整合包](https://github.com/RachelForster/Shinsekai/releases) 任选；社区插件索引见 [Shinsekai-Plugin-Registry](https://github.com/RachelForster/Shinsekai-Plugin-Registry)。
+- **开源可玩**：源码与 [发行版整合包]从 Releases 下载解压；社区插件索引见 [Shinsekai-Plugin-Registry]。
 
 ---
 
