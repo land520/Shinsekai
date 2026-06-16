@@ -8,21 +8,39 @@ is responsible for actually inserting widgets into sidebars, tab bars, etc.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
-from PySide6.QtWidgets import QWidget
+if TYPE_CHECKING:
+    from PySide6.QtWidgets import QWidget
+else:
+    QWidget = Any
 
-from sdk.plugin_host_context import PluginSettingsUIContext
-from sdk.chat_ui_context import ChatUIContext
+if TYPE_CHECKING:
+    from sdk.chat_ui_context import ChatUIContext
+    from sdk.plugin_host_context import PluginSettingsUIContext
+else:
+    ChatUIContext = Any
+    PluginSettingsUIContext = Any
 
 __all__ = [
     "ChatUIContext",
     "ChatUIContribution",
+    "ChatOutputContract",
+    "FieldPatch",
+    "FrontendConfigAction",
+    "FrontendConfigContribution",
+    "FrontendPageContribution",
+    "OutputContractPatch",
+    "OutputFieldSpec",
     "PluginDescriptor",
     "PluginSettingsUIContext",
     "QWidget",
+    "RequirementPatch",
+    "RequirementSpec",
     "SettingsUIContribution",
     "ToolsTabContribution",
+    "WorkflowContribution",
 ]
 
 
@@ -71,6 +89,82 @@ class ToolsTabContribution:
 
 
 @dataclass(frozen=True)
+class FrontendConfigAction:
+    """
+    An interactive action button rendered alongside the save button on a
+    React-rendered plugin config page.
+
+    ``run`` receives the current form values and may return an optional
+    ``dict`` result that is forwarded to the frontend. Return ``None`` or
+    an empty dict when no result is needed.
+
+    ``variant`` maps to button intent: ``"primary"``, ``"ghost"``, or ``"danger"``.
+    Set ``confirm`` to a non-empty message to prompt the user before running.
+
+    ``order`` controls sort order relative to other actions on the same page.
+    """
+
+    id: str
+    label: str
+    description: str = ""
+    variant: Literal["primary", "ghost", "danger"] = "ghost"
+    confirm: str = ""
+    order: float = 100.0
+    run: Callable[[Mapping[str, Any]], Mapping[str, Any] | None] = lambda values: None
+
+
+@dataclass(frozen=True)
+class FrontendConfigContribution:
+    """
+    A React-renderable plugin page described by JSON-safe schema and callbacks.
+
+    Unlike :class:`SettingsUIContribution` and :class:`ToolsTabContribution`,
+    this contribution does not expose a Qt ``QWidget``. The bridge serializes
+    ``schema`` and ``load_values()`` to the frontend, then calls
+    ``save_values(values)`` when the user saves.
+
+    ``i18n`` may provide localized labels keyed by UI language, e.g.
+    ``{"zh_CN": {"title": "...", "groups": {"main": {"fields": {"enabled": {"label": "..."}}}}}}``.
+    Missing localized strings fall back to the base ``title`` / ``schema`` strings.
+    """
+
+    page_id: str
+    title: str
+    schema: list[dict[str, Any]]
+    load_values: Callable[[], Mapping[str, Any]]
+    save_values: Callable[[Mapping[str, Any]], None]
+    kind: Literal["settings", "tools"] = "settings"
+    description: str = ""
+    restart_hint: str = ""
+    order: float = 100.0
+    plugin_id: str | None = None
+    plugin_version: str | None = None
+    i18n: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    actions: list[FrontendConfigAction] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FrontendPageContribution:
+    """
+    A plugin-owned frontend page served as static files and embedded by iframe.
+
+    ``entry`` points at the page's ``index.html``. Relative paths are resolved
+    from the current working directory; plugins may pass an absolute path based
+    on ``Path(__file__).parent``. Assets are served only from the entry file's
+    containing directory.
+    """
+
+    page_id: str
+    title: str
+    entry: str
+    kind: Literal["settings", "tools"] = "settings"
+    description: str = ""
+    order: float = 100.0
+    plugin_id: str | None = None
+    plugin_version: str | None = None
+
+
+@dataclass(frozen=True)
 class ChatUIContribution:
     """
     Extra widgets for the Chat UI window (:class:`~ui.chat_ui.chat_ui.ChatUIWindow`).
@@ -87,6 +181,96 @@ class ChatUIContribution:
     placement: str
     build: Callable[[ChatUIContext], QWidget]
     order: float = 100.0
+    plugin_id: str | None = None
+    plugin_version: str | None = None
+
+
+@dataclass(frozen=True)
+class OutputFieldSpec:
+    """One field in an LLM JSON output contract.
+
+    ``key`` should be a simple JSON object member name. ``aliases`` are
+    prompt-facing hints for alternative names the LLM may see or produce.
+    """
+
+    key: str
+    type: str = "string"
+    description: str = ""
+    required: bool = False
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RequirementSpec:
+    """One stable, patchable requirement in an LLM output contract."""
+
+    id: str
+    text: str
+    order: float = 100.0
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class FieldPatch:
+    """Partial override for one output field's prompt-facing contract.
+
+    ``description=None`` keeps the current description. ``description=""`` is
+    also treated as keep-current so plugins do not accidentally erase guidance.
+    """
+
+    description: str | None = None
+    required: bool | None = None
+    type: str | None = None
+    enum: tuple[Any, ...] | None = None
+
+
+@dataclass(frozen=True)
+class RequirementPatch:
+    """Patch operation for a requirement identified by stable id."""
+
+    mode: Literal["append", "prepend", "replace", "remove"]
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class OutputContractPatch:
+    """
+    Local modification to an existing LLM output contract.
+
+    Use this when a plugin wants to reuse an existing workflow but adjust prompt
+    requirements or field semantics, such as tightening ``speech`` output rules.
+    """
+
+    id: str
+    target_contract: str
+    priority: float = 100.0
+    field_patches: dict[str, FieldPatch] = field(default_factory=dict)
+    add_fields: tuple[OutputFieldSpec, ...] = ()
+    remove_fields: tuple[str, ...] = ()
+    requirement_patches: dict[str, RequirementPatch] = field(default_factory=dict)
+    add_requirements: tuple[RequirementSpec, ...] = ()
+
+
+@dataclass(frozen=True)
+class ChatOutputContract:
+    """Complete schema contract owned by a workflow."""
+
+    id: str
+    json_schema: dict[str, Any]
+    requirements: tuple[str, ...] = ()
+    target_export: str = "llm.output"
+    stream_mode: Literal["json_object", "json_lines", "json_array"] = "json_object"
+
+
+@dataclass(frozen=True)
+class WorkflowContribution:
+    """A plugin-provided workflow YAML plus optional LLM output contract."""
+
+    id: str
+    name: str
+    yaml_path: str
+    description: str = ""
+    output_contract: ChatOutputContract | None = None
 
 
 @dataclass

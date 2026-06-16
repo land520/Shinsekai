@@ -1,0 +1,149 @@
+# .github/workflows/link-issue-from-comment.yml
+name: Link issue from PR comment
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  link:
+    if: ${{ github.event.issue.pull_request && startsWith(github.event.comment.body, '/link ') }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Append closing keyword to PR body
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENTER: ${{ github.event.comment.user.login }}
+          AUTHOR_ASSOCIATION: ${{ github.event.comment.author_association }}
+        run: |
+          set -euo pipefail
+
+          target="$(python3 - <<'PY'
+          import os, re, sys
+          
+          body = os.environ["COMMENT_BODY"].replace("\r\n", "\n")
+          
+          # 允许 comment 里其他内容存在，只要某一行是：
+          # /link owner/repo#123
+          m = re.search(
+              r"(?m)^[ \t]*/link[ \t]+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+)[ \t]*$",
+              body,
+          )
+          
+          if not m:
+              sys.exit(1)
+          
+          print(m.group(1))
+          PY
+          )" || {
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Usage: \`/link owner/repo#123\`"
+            exit 0
+          }
+
+          pr_author="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.user.login')"
+          head_repo="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.repo.full_name')"
+          base_repo="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.base.repo.full_name')"
+          base_ref="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.base.ref')"
+          default_branch="$(gh api "repos/$REPO" --jq '.default_branch')"
+
+          # 只允许 PR 作者或仓库协作者触发
+          if [[ "$COMMENTER" != "$pr_author" && ! "$AUTHOR_ASSOCIATION" =~ ^(OWNER|MEMBER|COLLABORATOR)$ ]]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Sorry, only the PR author or a maintainer can use \`/link\`."
+            exit 0
+          fi
+
+          # 防止随便关闭别的仓库 issue：只允许链接 base repo 或 PR head fork 的 issue
+          target_repo="${target%#*}"
+          if [[ "$target_repo" != "$head_repo" && "$target_repo" != "$base_repo" ]]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Refused: target issue must be in \`$head_repo\` or \`$base_repo\`."
+            exit 0
+          fi
+
+          # GitHub 只在 PR 指向默认分支时解释 closing keywords
+          if [[ "$base_ref" != "$default_branch" ]]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "This PR targets \`$base_ref\`, not the default branch \`$default_branch\`; GitHub may ignore closing keywords."
+            exit 0
+          fi
+
+          gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.body // ""' > /tmp/pr_body.md
+
+          TARGET="$target" python3 - <<'PY'
+          import os
+          import re
+
+          body = open("/tmp/pr_body.md", encoding="utf-8").read()
+          target = os.environ["TARGET"]
+          target_key = target.lower()
+          line = f"Closes {target}"
+
+          start = "<!-- issue-link-bot:start -->"
+          end = "<!-- issue-link-bot:end -->"
+          heading = "### Linked issues"
+          closing_re = re.compile(
+              r"^(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+"
+              r"(?P<issue>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+)\s*$",
+              re.IGNORECASE,
+          )
+
+          def closing_issue_ref(text):
+              match = closing_re.match(text.strip())
+              if not match:
+                  return None
+              return match.group("issue")
+
+          def normalize_link_lines(lines):
+              normalized = []
+              seen = set()
+              for raw_line in lines:
+                  issue_ref = closing_issue_ref(raw_line)
+                  if not issue_ref:
+                      continue
+                  key = issue_ref.lower()
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  normalized.append(f"Closes {issue_ref}")
+              return normalized, seen
+
+          def render_block(lines):
+              content = "\n".join(lines)
+              return f"{start}\n\n{heading}\n\n{content}\n\n{end}"
+
+          existing_issue_refs = {
+              issue_ref.lower()
+              for issue_ref in map(closing_issue_ref, body.splitlines())
+              if issue_ref
+          }
+
+          if start in body and end in body:
+              before, rest = body.split(start, 1)
+              block, after = rest.split(end, 1)
+              link_lines, _ = normalize_link_lines(block.splitlines())
+              if target_key not in existing_issue_refs:
+                  link_lines.append(line)
+              new_body = before.rstrip() + "\n\n" + render_block(link_lines) + after
+          elif target_key in existing_issue_refs:
+              new_body = body
+          else:
+              block = render_block([line])
+              new_body = body.rstrip() + "\n\n" + block + "\n"
+
+          open("/tmp/new_pr_body.md", "w", encoding="utf-8").write(new_body)
+          PY
+
+          gh api \
+            --method PATCH \
+            "repos/$REPO/pulls/$PR_NUMBER" \
+            --raw-field body="$(cat /tmp/new_pr_body.md)" \
+            >/dev/null
+
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Linked: \`Closes $target\` was added to the PR description."

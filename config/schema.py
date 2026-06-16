@@ -169,7 +169,7 @@ class SystemConfig(BaseModel):
         description="faster-whisper / RealtimeSTT compute_type，留空则按设备自动选择",
     )
     music_volumn: DefaultIfNone[int] =Field(default=30,description="bgm 音量")
-    theme_color: DefaultIfNone[str] = Field(default='rgba(50,50,50,200)',description="主题色")
+    theme_color: DefaultIfNone[str] = Field(default='#d4788e',description="主题色")
     bgm_path: DefaultIfNone[str] = Field(default="",description="BGM 的路径")
     background_path: DefaultIfNone[str] = Field(default="",description="背景图片的路径")
     live_room_id : DefaultIfNone[str] = Field(default="", description="直播间ID，用于直播相关功能")
@@ -183,6 +183,31 @@ class SystemConfig(BaseModel):
     )
 
     # 音乐翻唱流水线（YouTube/B站下载 → UVR 分离 → RVC 转换 → pydub 合成）
+    mirror_auto_detect_china: DefaultIfNone[bool] = Field(
+        default=True,
+        description="Auto-detect China network and fill mirror sources.",
+    )
+    mirror_region: DefaultIfNone[str] = Field(
+        default="auto",
+        description="Detected mirror region: auto / china / global.",
+    )
+    huggingface_mirror_url: DefaultIfNone[str] = Field(
+        default="",
+        description="Hugging Face mirror URL, exported as HF_ENDPOINT.",
+    )
+    huggingface_cache_dir: DefaultIfNone[str] = Field(
+        default="",
+        description="Hugging Face cache directory, exported as HF_HOME.",
+    )
+    github_mirror_url: DefaultIfNone[str] = Field(
+        default="",
+        description="GitHub mirror URL or proxy prefix.",
+    )
+    pypi_mirror_url: DefaultIfNone[str] = Field(
+        default="",
+        description="PyPI mirror URL for Shinsekai-managed pip installs.",
+    )
+
     music_cover_work_dir: DefaultIfNone[str] = Field(
         default="./data/music_cover",
         description="翻唱流水线工作目录（下载、分离、中间文件与成品）",

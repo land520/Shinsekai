@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
-import os
-import sys
 import threading
 import time
 from pathlib import Path
@@ -11,29 +8,16 @@ from typing import Any, Optional
 
 from sdk.lang import normalize_lang
 from sdk.adapters.asr import ASRAdapter, TranscriptionCallback
+from sdk.logging import get_logger
+from core.paths import resource_path
 
 # Vosk 模型默认路径（可按本机下载模型修改）
-VOSK_MODEL_PATH = "./assets/system/models/vosk-model-small-cn-0.22"
+VOSK_MODEL_PATH = str(resource_path("assets/system/models/vosk-model-small-cn-0.22"))
 
 
-def get_asr_log() -> logging.Logger:
-    """ASR 专用 logger：默认 stderr。级别可用环境变量 EASYAI_ASR_LOG（DEBUG/INFO/WARNING）。"""
-    log = logging.getLogger("easyai.asr")
-    if log.handlers:
-        return log
-    h = logging.StreamHandler(sys.stderr)
-    h.setFormatter(
-        logging.Formatter(
-            "%(asctime)s [%(levelname)s] [%(threadName)s] easyai.asr: %(message)s"
-        )
-    )
-    log.addHandler(h)
-    # _name = (os.environ.get("EASYAI_ASR_LOG") or "INFO").upper()
-    _name = 'ERROR'
-    _lvl = getattr(logging, _name, logging.INFO)
-    log.setLevel(_lvl if isinstance(_lvl, int) else logging.INFO)
-    log.propagate = False
-    return log
+def get_asr_log():
+    """Return the ASR logger managed by the host logging configuration."""
+    return get_logger(__name__)
 
 
 _log = get_asr_log()
@@ -124,7 +108,12 @@ class VoskAdapter(ASRAdapter):
 
         self._pyaudio = pyaudio
         self._KaldiRecognizer = KaldiRecognizer
-        self.model_path = Path(model_path).absolute().as_posix()
+        raw_model_path = Path(model_path).expanduser()
+        self.model_path = (
+            raw_model_path.resolve(strict=False)
+            if raw_model_path.is_absolute()
+            else resource_path(raw_model_path)
+        ).as_posix()
         self._is_running = False
         self._thread: Optional[threading.Thread] = None
 

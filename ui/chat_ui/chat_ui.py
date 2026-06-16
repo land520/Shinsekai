@@ -6,7 +6,7 @@ import numpy as np
 import threading
 import yaml
 import time
-from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, Qt, Signal, QSize, QUrl, QTimer
+from PySide6.QtCore import QByteArray, QEvent, QPoint, QRect, Qt, Signal, QSize, QUrl
 from PySide6.QtGui import (
     QCursor,
     QFont,
@@ -39,6 +39,7 @@ project_root = current_script.parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+from core.paths import resource_path
 from ui.chat_ui import styles
 from ui.chat_ui.components import CGWidget, ClickableLabel, TypingLabel, SpritePanel
 from ui.chat_ui.desktop_menu import DesktopMenuMixin
@@ -55,7 +56,7 @@ config_manager = ConfigManager()
 
 _logger = logging.getLogger(__name__)
 
-DIALOG_FRAME_PATH = Path('./assets/system/picture/dialog_frame.png').absolute().as_posix()
+DIALOG_FRAME_PATH = resource_path("assets/system/picture/dialog_frame.png").as_posix()
 class ChatUIWindow(DesktopToolbarMixin, DesktopMenuMixin, QWidget):
     """桌面助手主窗口"""
     message_submitted = Signal(str)  # 定义信号用于发送消息
@@ -106,7 +107,6 @@ class ChatUIWindow(DesktopToolbarMixin, DesktopMenuMixin, QWidget):
         # 对话/选项区：小于启动时透明窗初始宽度则横向上与容器同宽（无左右留白）
         self._overlay_min_ref_width = max(1, int(self.original_width))
         self.current_background_path = None
-        self._close_started = False
         # 全尺寸图，供 resize 时重缩放，使底栏 input 与整窗共用同一底图
         self._background_source_pixmap = None
         self._last_user_message = ""
@@ -1561,28 +1561,15 @@ class ChatUIWindow(DesktopToolbarMixin, DesktopMenuMixin, QWidget):
         super().mouseReleaseEvent(event)
 
     def closeEvent(self, event):
-        if self._close_started:
-            event.accept()
-            return
-        self._close_started = True
+        """关闭窗口时停止线程"""
         if self._resizing:
             self._end_resize()
         self._persist_chat_window_geometry()
-        self.setEnabled(False)
-        self.hide()
-        event.accept()
-        QTimer.singleShot(0, self._finish_close)
-        return
-
-    def _finish_close(self):
-        try:
-            self.mic_button.close()
-        except Exception:
-            _logger.exception("mic close cleanup")
+        self.mic_button.close()
         if self.display_thread:
             self.display_thread.stop()
-            if not self.display_thread.wait(1000):
-                _logger.warning("display thread did not stop within 1s")
+            self.display_thread.wait()
+        super().closeEvent(event)
         self.close_window.emit()
         from ui.chat_ui.signal_bridge import detach_chat_ui_window
 

@@ -8,6 +8,7 @@ import importlib
 import logging
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Type
 
 from sdk.handlers import MessageHandler, UIOutputMessageHandler
@@ -18,9 +19,13 @@ if TYPE_CHECKING:
 from sdk.plugin import PluginBase
 from sdk.types import (
     ChatUIContribution,
+    FrontendConfigContribution,
+    FrontendPageContribution,
+    OutputContractPatch,
     PluginDescriptor,
     SettingsUIContribution,
     ToolsTabContribution,
+    WorkflowContribution,
 )
 
 logger = logging.getLogger(__name__)
@@ -127,9 +132,13 @@ class PluginCapabilityRegistry:
         self._settings_contributions: list[SettingsUIContribution] = []
         self._settings_ui_plugin_ctx: tuple[str, str] | None = None
         self._tools_tab_contributions: list[ToolsTabContribution] = []
+        self._frontend_config_contributions: list[FrontendConfigContribution] = []
+        self._frontend_page_contributions: list[FrontendPageContribution] = []
         self._chat_ui_contributions: list[ChatUIContribution] = []
-        self._dag_node_factories: list[tuple[Callable[[], list], bool]] = []
-        self._dag_yaml_paths: list[str] = []
+        self._workflow_contributions: list[WorkflowContribution] = []
+        self._output_contract_patches: list[OutputContractPatch] = []
+        # [MemorySystem] 精简前钩子存储列表
+        self._compact_hooks: list[Callable[[list], None]] = []
 
     def register_llm_adapter(self, provider: str, adapter_cls: Type[LLMAdapter]) -> None:
         self._llm_adapters[provider] = adapter_cls
@@ -197,35 +206,77 @@ class PluginCapabilityRegistry:
             )
         self._tools_tab_contributions.append(contribution)
 
+    def register_frontend_config_page(self, contribution: FrontendConfigContribution) -> None:
+        ctx = self._settings_ui_plugin_ctx
+        if ctx is not None:
+            pid, ver = ctx
+            contribution = replace(
+                contribution,
+                plugin_id=contribution.plugin_id or pid,
+                plugin_version=contribution.plugin_version or ver,
+            )
+        self._frontend_config_contributions.append(contribution)
+
+    def register_frontend_page(self, contribution: FrontendPageContribution) -> None:
+        ctx = self._settings_ui_plugin_ctx
+        if ctx is not None:
+            pid, ver = ctx
+            contribution = replace(
+                contribution,
+                plugin_id=contribution.plugin_id or pid,
+                plugin_version=contribution.plugin_version or ver,
+            )
+        self._frontend_page_contributions.append(contribution)
+
     def register_chat_ui_widget(self, contribution: ChatUIContribution) -> None:
+        ctx = self._settings_ui_plugin_ctx
+        if ctx is not None:
+            pid, ver = ctx
+            contribution = replace(
+                contribution,
+                plugin_id=contribution.plugin_id or pid,
+                plugin_version=contribution.plugin_version or ver,
+            )
         self._chat_ui_contributions.append(contribution)
 
-    def register_dag_node(
-        self,
-        factory: Callable[[], list],
-        *,
-        skip_default: bool = False,
-    ) -> None:
-        """Register DAG node candidates for plugin tooling.
-
-        Runtime workflow execution no longer auto-merges registered nodes.
-        Users select exactly one workflow YAML, and that YAML references node
-        classes directly by dotted import path. ``skip_default`` is kept for
-        compatibility and is not used by the runtime builder.
-        """
-        self._dag_node_factories.append((factory, skip_default))
-
     def register_dag_yaml(self, path: str) -> None:
-        """Register a workflow YAML path (reserved for future workflow selection UX).
+        """Register a workflow YAML path.
 
         .. note::
-            This API is **reserved** and not yet active.  Plugin-registered
-            workflow YAML paths are collected but are not consumed by the
-            runtime builder, CLI, or Settings UI yet.  Plugins that call this
-            method today will have their paths stored, but users have no
-            mechanism to select them at runtime.
+            Kept for compatibility. Prefer :meth:`register_workflow` when the
+            workflow also owns an LLM output contract/schema.
         """
-        self._dag_yaml_paths.append(path)
+        cleaned = str(path).strip()
+        if not cleaned:
+            raise ValueError("Workflow YAML path cannot be empty")
+        self.register_workflow(
+            WorkflowContribution(
+                id=cleaned,
+                name=Path(cleaned).stem or cleaned,
+                yaml_path=cleaned,
+            )
+        )
+
+    def register_workflow(self, contribution: WorkflowContribution) -> None:
+        """Register a selectable workflow and optional output contract/schema."""
+        if not contribution.id.strip():
+            raise ValueError("WorkflowContribution.id cannot be empty")
+        if not contribution.yaml_path.strip():
+            raise ValueError("WorkflowContribution.yaml_path cannot be empty")
+        self._workflow_contributions.append(contribution)
+
+    def register_output_contract_patch(self, patch: OutputContractPatch) -> None:
+        """Patch a named output contract while reusing its workflow."""
+        if not patch.id.strip():
+            raise ValueError("OutputContractPatch.id cannot be empty")
+        if not patch.target_contract.strip():
+            raise ValueError("OutputContractPatch.target_contract cannot be empty")
+        self._output_contract_patches.append(patch)
+
+    # [MemorySystem] 注册精简前回调钩子
+    def register_compact_hook(self, hook: Callable[[list], None]) -> None:
+        """注册精简前回调。回调接收即将被精简的完整消息列表，在 compact_messages() 执行前调用。"""
+        self._compact_hooks.append(hook)
 
     @property
     def llm_adapters(self) -> dict[str, Type[LLMAdapter]]:
@@ -262,16 +313,33 @@ class PluginCapabilityRegistry:
         return sorted(self._tools_tab_contributions, key=lambda c: c.order)
 
     @property
+    def frontend_config_contributions(self) -> list[FrontendConfigContribution]:
+        return sorted(self._frontend_config_contributions, key=lambda c: c.order)
+
+    @property
+    def frontend_page_contributions(self) -> list[FrontendPageContribution]:
+        return sorted(self._frontend_page_contributions, key=lambda c: c.order)
+
+    @property
     def chat_ui_contributions(self) -> list[ChatUIContribution]:
         return sorted(self._chat_ui_contributions, key=lambda c: c.order)
 
     @property
-    def dag_node_factories(self) -> list[tuple[Callable[[], list], bool]]:
-        return list(self._dag_node_factories)
+    def dag_yaml_paths(self) -> list[str]:
+        return [c.yaml_path for c in self._workflow_contributions]
 
     @property
-    def dag_yaml_paths(self) -> list[str]:
-        return list(self._dag_yaml_paths)
+    def workflow_contributions(self) -> list[WorkflowContribution]:
+        return list(self._workflow_contributions)
+
+    @property
+    def output_contract_patches(self) -> list[OutputContractPatch]:
+        return sorted(self._output_contract_patches, key=lambda p: p.priority)
+
+    # [MemorySystem] 暴露已注册的精简前钩子列表
+    @property
+    def compact_hooks(self) -> list[Callable[[list], None]]:
+        return list(self._compact_hooks)
 
     def apply_llm_tools(self, tool_manager: ToolManager) -> None:
         for registrar in self._llm_tool_registrars:
@@ -279,4 +347,4 @@ class PluginCapabilityRegistry:
 
 
 # Backward-compatible name: plugins should type-hint this in ``initialize(register, ...)``.
-PluginRegister = PluginCapabilityRegistry
+PluginRegister = PluginCapabilityRegistry 

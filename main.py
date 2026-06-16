@@ -2,12 +2,16 @@ import os
 from pathlib import Path
 import sys
 
-# 打包后须在任何会触发 ConfigManager 的 import 之前设发行根 cwd（同 webui_qt）
+# Frozen standalone keeps the old release-root data behavior. Desktop bridge
+# launches can provide EASYAI_PROJECT_ROOT to keep chat data under app data.
 if getattr(sys, "frozen", False):
     try:
         _rel = Path(sys.executable).resolve().parent.parent
-        os.environ["EASYAI_PROJECT_ROOT"] = str(_rel)
-        os.chdir(_rel)
+        _data_root = Path(os.environ.get("EASYAI_PROJECT_ROOT") or _rel).expanduser().resolve(strict=False)
+        _data_root.mkdir(parents=True, exist_ok=True)
+        os.environ["EASYAI_PROJECT_ROOT"] = str(_data_root)
+        os.environ.setdefault("SHINSEKAI_APP_ROOT", str(_rel))
+        os.chdir(_data_root)
     except OSError:
         pass
 
@@ -21,6 +25,17 @@ if getattr(sys, "frozen", False):
 
     init_frozen_stdio("main")
 
+from sdk.logging import configure_logging, get_logger
+from sdk.exception.handler import handle_main_exception, install_main_exception_hook
+
+configure_logging("chat", project_root=os.environ.get("EASYAI_PROJECT_ROOT") or project_root)
+logger = get_logger(__name__)
+install_main_exception_hook(app_name="Shinsekai Chat", logger=logger)
+
+from config.mirror_env import apply_mirror_environment_from_system_config
+
+apply_mirror_environment_from_system_config()
+
 import llm.tools.character_tools
 import llm.tools.memory_tools
 import llm.tools.tool_search
@@ -30,11 +45,11 @@ from llm.llm_manager import LLMManager, LLMAdapterFactory
 from llm.text_processor import TextProcessor
 from core.runtime.app_runtime import AppRuntime, set_app_runtime
 from core.runtime.workflow import build_runtime_workflow, get_chat_workflow_handles
+from core.paths import resource_path
 from tts.tts_manager import TTSManager, TTSAdapterFactory
 from config.config_manager import ConfigManager
 from t2i.t2i_manager import T2IAdapterFactory, T2IManager
 import pygame
-import traceback
 from opencc import OpenCC
 from queue import Queue
 
@@ -50,6 +65,7 @@ from core.sprite.chat_ui_service import (
     restore_session_ui,
     wire_chat_ui_bridge,
 )
+from core.sprite.initial_sprite import display_initial_sprite
 from core.sprite.sprite_cli import parse_sprite_args
 try:
     from live.danmuku_handler import start_bilibili_service
@@ -73,15 +89,8 @@ def _shutdown_plugins() -> None:
         pass
 
 
-def _mask_secret(value: str) -> str:
-    if not value:
-        return ""
-    if len(value) <= 8:
-        return "***"
-    return f"{value[:4]}...{value[-4:]}"
-
-
 def main():
+    logger.info("Chat application starting", extra={"event": "app.started"})
     config = ConfigManager()
     from i18n import init_i18n, tr as tr_i18n, tr_in_bundle
     from asr.asr_adapter import system_config_to_asr_lang
@@ -118,9 +127,8 @@ def main():
                 ),
             )
             t2i_manager = T2IManager(t2i_adapter)
-        except Exception as e:
-            print(tr_i18n("main.print_t2i_fail", e=str(e)))
-            traceback.print_exc()
+        except Exception:
+            logger.exception("T2I initialization failed", extra={"event": "t2i.init.failed"})
 
     # TTS：仅当 API 中语音引擎不是「不使用」时加载；命令行 --tts 可覆盖引擎名（与 api.yaml 一致）
     gsv_url, gsv_api_path, config_tts_provider = config.get_gpt_sovits_config()
@@ -142,9 +150,8 @@ def main():
             tts_manager.set_tts_adapter(adapter=adapter)
             _voice_lang = str(config.config.system_config.voice_language or "ja").strip() or "ja"
             tts_manager.set_language(_voice_lang)
-        except Exception as e:
-            print(tr_i18n("main.print_tts_fail", e=str(e)))
-            traceback.print_exc()
+        except Exception:
+            logger.exception("TTS initialization failed", extra={"event": "tts.init.failed"})
 
     print(tr_i18n("main.print_load_template", a=args))
 
@@ -161,7 +168,16 @@ def main():
 
     # Init LLMManager before UI, so that handlers can access it via get_app_runtime().llm_manager
     llm_provider, llm_model, base_url, api_key = config.get_llm_api_config()
-    print(llm_provider, llm_model, base_url, _mask_secret(api_key))
+    logger.info(
+        "LLM configuration selected",
+        extra={
+            "event": "llm.config.selected",
+            "provider": llm_provider,
+            "model": llm_model,
+            "custom_base_url": bool(base_url),
+            "auth_configured": bool(api_key),
+        },
+    )
     if not llm_provider:
         print(tr_i18n("main.err_select_llm"))
         return
@@ -235,7 +251,7 @@ def main():
         pass
 
     if args.headless and not (args.workflow or "").strip():
-        headless_workflow = "assets/system/workflow/headless.yaml"
+        headless_workflow = str(resource_path("assets/system/workflow/headless.yaml"))
     else:
         headless_workflow = None
 
@@ -327,7 +343,7 @@ def main():
     init_sprite_path = args.init_sprite_path
     print(init_sprite_path)
     if not init_sprite_path:
-        init_sprite_path = "./assets/system/picture/shinsekai.png"
+        init_sprite_path = str(resource_path("assets/system/picture/shinsekai.png"))
 
     if system_config_to_asr_lang(config.config.system_config) == "zh":
         _welcome_html = tr_in_bundle("main.welcome_html", "zh_CN")
@@ -364,13 +380,20 @@ def main():
 
     chat_ui_ctx = install_chat_ui_context(window, emit_user_text=emit_user_text)
 
+    restored_sprite = False
     if audio_path_queue is not None:
-        restore_session_ui(
+        restored_sprite = restore_session_ui(
             messages,
             audio_path_queue=audio_path_queue,
             window=window,
             config=config,
             tr_i18n=tr_i18n,
+        )
+    if not restored_sprite:
+        display_initial_sprite(
+            init_sprite_path,
+            config=config,
+            ui_updates=ui_updates,
         )
 
     wire_chat_ui_bridge(
@@ -398,7 +421,7 @@ def main():
 
     # 确保在程序退出时停止所有线程
     try:
-        appIcon = QIcon("./assets/system/picture/icon.png")
+        appIcon = QIcon(str(resource_path("assets/system/picture/Icon.png")))
         app.setWindowIcon(appIcon)
     except Exception as e:
         print(tr_i18n("main.print_icon_fail", e=str(e)))
@@ -421,4 +444,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:
+        handle_main_exception(exc, app_name="Shinsekai Chat", logger=logger)

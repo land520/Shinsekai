@@ -12,6 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from config.mirror_env import mirror_github_url
 
 logger = logging.getLogger(__name__)
 _PLUGINS_DIR = Path("plugins")
@@ -57,8 +58,23 @@ _DL_USER_AGENT = (
 
 
 def normalize_repo_slug(repo: str) -> str:
-    parts = [p.strip() for p in repo.strip().strip("/").split("/") if p.strip()]
-    return "/".join(parts).lower()
+    raw = repo.strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if lowered.startswith("git@github.com:"):
+        raw = raw.split(":", 1)[1]
+    elif lowered.startswith("https://github.com/") or lowered.startswith("http://github.com/"):
+        raw = raw.split("github.com/", 1)[1]
+    elif lowered.startswith("github.com/"):
+        raw = raw.split("/", 1)[1]
+    raw = raw.split("#", 1)[0].split("?", 1)[0].strip("/")
+    if raw.endswith(".git"):
+        raw = raw[:-4]
+    parts = [p.strip() for p in raw.split("/") if p.strip()]
+    if len(parts) < 2:
+        return ""
+    return "/".join(parts[:2]).lower()
 
 
 def normalize_manifest_entry(entry: str) -> str:
@@ -74,22 +90,44 @@ def normalize_manifest_entry(entry: str) -> str:
     return f"plugins.{norm}"
 
 
-def _load_download_state() -> tuple[list[str], dict[str, str]]:
-    """Load persisted repos (sorted) and manifest-entry -> repo slug mapping."""
+def _normalize_install_metadata(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "dependencyDetail",
+        "dependencyStatus",
+        "entry",
+        "packageSha256",
+        "packageSize",
+        "packageSource",
+        "packageStatus",
+        "packageUrl",
+        "refKind",
+        "repo",
+        "sourceLabel",
+        "sourceType",
+        "tagName",
+    }
+    return {key: item for key, item in value.items() if key in allowed and item not in (None, "")}
+
+
+def _load_download_state_payload() -> tuple[list[str], dict[str, str], dict[str, dict[str, object]]]:
+    """Load persisted repos, manifest-entry mapping, and install metadata."""
     if not _DOWNLOAD_STATE_PATH.is_file():
-        return [], {}
+        return [], {}, {}
     try:
         raw = json.loads(_DOWNLOAD_STATE_PATH.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         logger.warning("Could not read plugin download state: %s", _DOWNLOAD_STATE_PATH)
-        return [], {}
+        return [], {}, {}
     if isinstance(raw, list):
         repos_set = {normalize_repo_slug(str(x)) for x in raw if str(x).strip()}
-        return sorted(repos_set), {}
+        return sorted(repos_set), {}, {}
     if not isinstance(raw, dict):
-        return [], {}
+        return [], {}, {}
     repos_raw = raw.get("repos", [])
     er_raw = raw.get("entry_repo", {})
+    install_raw = raw.get("entry_install", {})
     repos_set: set[str] = set()
     if isinstance(repos_raw, list):
         for x in repos_raw:
@@ -108,12 +146,33 @@ def _load_download_state() -> tuple[list[str], dict[str, str]]:
             nv = normalize_repo_slug(vs)
             if nk and nv:
                 entry_repo[nk] = nv
-    return sorted(repos_set), entry_repo
+    entry_install: dict[str, dict[str, object]] = {}
+    if isinstance(install_raw, dict):
+        for k, v in install_raw.items():
+            if not isinstance(k, str):
+                continue
+            nk = normalize_manifest_entry(k.strip())
+            metadata = _normalize_install_metadata(v)
+            if nk and metadata:
+                entry_install[nk] = metadata
+    return sorted(repos_set), entry_repo, entry_install
 
 
-def _write_download_state(repos: list[str], entry_repo: dict[str, str]) -> None:
+def _load_download_state() -> tuple[list[str], dict[str, str]]:
+    """Load persisted repos (sorted) and manifest-entry -> repo slug mapping."""
+    repos, entry_repo, _entry_install = _load_download_state_payload()
+    return repos, entry_repo
+
+
+def _write_download_state(
+    repos: list[str],
+    entry_repo: dict[str, str],
+    entry_install: dict[str, dict[str, object]] | None = None,
+) -> None:
+    if entry_install is None:
+        _repos, _entry_repo, entry_install = _load_download_state_payload()
     _DOWNLOAD_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"repos": repos, "entry_repo": entry_repo}
+    payload = {"repos": repos, "entry_repo": entry_repo, "entry_install": entry_install}
     _DOWNLOAD_STATE_PATH.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -125,18 +184,39 @@ def load_downloaded_repos() -> set[str]:
     return set(repos)
 
 
-def mark_repo_downloaded(repo: str, *, manifest_entry: str | None = None) -> None:
+def load_plugin_install_metadata(entry: str) -> dict[str, object]:
+    """Return persisted install metadata for a manifest entry."""
+    norm_e = normalize_manifest_entry(entry.strip())
+    if not norm_e:
+        return {}
+    _repos, _entry_repo, entry_install = _load_download_state_payload()
+    return dict(entry_install.get(norm_e) or {})
+
+
+def mark_repo_downloaded(
+    repo: str,
+    *,
+    manifest_entry: str | None = None,
+    install_metadata: dict[str, object] | None = None,
+) -> None:
     slug = normalize_repo_slug(repo)
     if not slug:
         return
-    repos_list, er = _load_download_state()
+    repos_list, er, entry_install = _load_download_state_payload()
     repos_set = set(repos_list)
     repos_set.add(slug)
     er = dict(er)
+    entry_install = dict(entry_install)
     me = (manifest_entry or "").strip()
     if me:
-        er[normalize_manifest_entry(me)] = slug
-    _write_download_state(sorted(repos_set), er)
+        norm_e = normalize_manifest_entry(me)
+        er[norm_e] = slug
+        metadata = _normalize_install_metadata(install_metadata or {})
+        if metadata:
+            entry_install[norm_e] = metadata
+        elif install_metadata is not None:
+            entry_install.pop(norm_e, None)
+    _write_download_state(sorted(repos_set), er, entry_install)
 
 
 def unmark_repo_downloaded(repo: str) -> None:
@@ -144,11 +224,13 @@ def unmark_repo_downloaded(repo: str) -> None:
     slug = normalize_repo_slug(repo)
     if not slug:
         return
-    repos_list, er = _load_download_state()
-    er = {k: v for k, v in er.items() if normalize_repo_slug(v) != slug}
+    repos_list, er, entry_install = _load_download_state_payload()
+    removed_entries = {k for k, v in er.items() if normalize_repo_slug(v) == slug}
+    er = {k: v for k, v in er.items() if k not in removed_entries}
+    entry_install = {k: v for k, v in entry_install.items() if k not in removed_entries}
     repos_set = set(repos_list)
     repos_set.discard(slug)
-    _write_download_state(sorted(repos_set), er)
+    _write_download_state(sorted(repos_set), er, entry_install)
 
 
 def unmark_repo_for_manifest_entry(entry: str) -> bool:
@@ -160,22 +242,24 @@ def unmark_repo_for_manifest_entry(entry: str) -> bool:
     norm_e = normalize_manifest_entry(entry.strip())
     if not norm_e:
         return False
-    repos_list, er = _load_download_state()
+    repos_list, er, entry_install = _load_download_state_payload()
     if norm_e not in er:
         return False
     er = dict(er)
+    entry_install = dict(entry_install)
     slug = normalize_repo_slug(er.pop(norm_e))
+    entry_install.pop(norm_e, None)
     others = {normalize_repo_slug(v) for v in er.values()}
     repos_set = set(repos_list)
     if slug not in others:
         repos_set.discard(slug)
-    _write_download_state(sorted(repos_set), er)
+    _write_download_state(sorted(repos_set), er, entry_install)
     return True
 
 
 def _github_archive_zip_url(repo_slug: str, branch: str) -> str:
     base = "/".join(p.strip() for p in repo_slug.strip().strip("/").split("/") if p.strip())
-    return f"https://github.com/{base}/archive/refs/heads/{branch}.zip"
+    return mirror_github_url(f"https://github.com/{base}/archive/refs/heads/{branch}.zip")
 
 
 def _archive_top_prefix(zip_path: Path) -> str:

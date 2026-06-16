@@ -11,6 +11,7 @@ from config.schema import (
     clamp_compact_target_ratio,
 )
 from llm.constants import LLM_BASE_URLS
+from config.mirror_env import apply_mirror_environment
 import traceback
 
 
@@ -52,11 +53,29 @@ class ConfigManager:
     @property
     def version(self) -> str:
         """读取项目根目录 VERSION 文件，缺失时返回占位字符串。"""
+        candidates = [self._VERSION_PATH]
         try:
-            text = self._VERSION_PATH.read_text(encoding="utf-8").strip()
-            return text if text else "unknown"
+            from core.paths import resource_path
+
+            candidates.append(resource_path("VERSION"))
         except Exception:
-            return "unknown"
+            pass
+        seen: set[Path] = set()
+        for candidate in candidates:
+            try:
+                path = candidate.resolve(strict=False)
+            except OSError:
+                path = candidate
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                text = path.read_text(encoding="utf-8").strip()
+            except Exception:
+                continue
+            if text:
+                return text
+        return "unknown"
 
     @property
     def config(self) -> AppConfig:
@@ -107,6 +126,7 @@ class ConfigManager:
                 characters=character_list,
                 background_list=background
             )
+            apply_mirror_environment(system_config)
             print("配置加载成功！")
         except ValidationError as e:
             self._config = None
@@ -147,6 +167,7 @@ class ConfigManager:
             self._SYSTEM_CONFIG_PATH, 
             self.config.system_config.model_dump(by_alias=True)
         )
+        apply_mirror_environment(self.config.system_config)
         print("system_config.yaml 保存完成。")
 
     def set_ui_language(self, code: str) -> None:

@@ -32,8 +32,12 @@ if TYPE_CHECKING:
     from sdk.handlers import MessageHandler, UIOutputMessageHandler
     from sdk.types import (
         ChatUIContribution,
+        FrontendConfigContribution,
+        FrontendPageContribution,
+        OutputContractPatch,
         SettingsUIContribution,
         ToolsTabContribution,
+        WorkflowContribution,
     )
     from ui.settings_ui.context import SettingsUIContext
 
@@ -44,8 +48,9 @@ _loaded: bool = False
 _plugin_manager: PluginManager | None = None
 _plugin_tts_handlers: List["MessageHandler"] = []
 _plugin_ui_handlers: List["UIOutputMessageHandler"] = []
-_plugin_dag_node_factories: list[tuple[Callable[[], list], bool]] = []
 _plugin_dag_yaml_paths: list[str] = []
+_plugin_workflow_contributions: list["WorkflowContribution"] = []
+_plugin_output_contract_patches: list["OutputContractPatch"] = []
 
 
 def get_plugin_manager() -> PluginManager | None:
@@ -60,13 +65,24 @@ def get_plugin_ui_handlers() -> List["UIOutputMessageHandler"]:
     return list(_plugin_ui_handlers)
 
 
-def get_plugin_dag_node_factories() -> list[tuple[Callable[[], list], bool]]:
-    return list(_plugin_dag_node_factories)
-
-
 def get_plugin_dag_yaml_paths() -> list[str]:
-    """Return plugin-registered workflow YAML paths (reserved — not yet wired into UX)."""
+    """Return plugin-registered workflow YAML paths (reserved; not yet wired into UX)."""
     return list(_plugin_dag_yaml_paths)
+
+
+def get_plugin_workflow_contributions() -> list["WorkflowContribution"]:
+    """Return plugin-registered workflow descriptors."""
+    return list(_plugin_workflow_contributions)
+
+
+def get_plugin_output_contract_patches(
+    target_contract: str | None = None,
+) -> list["OutputContractPatch"]:
+    """Return plugin patches for LLM output contracts."""
+    patches = list(_plugin_output_contract_patches)
+    if target_contract is not None:
+        patches = [p for p in patches if p.target_contract == target_contract]
+    return patches
 
 
 def ensure_plugins_loaded(config: ConfigManager | None = None) -> PluginManager | None:
@@ -75,7 +91,9 @@ def ensure_plugins_loaded(config: ConfigManager | None = None) -> PluginManager 
     provider tables into the respective factories, register tools on the global ToolManager, and cache message handlers
     for :mod:`core.handlers.handler_registry`.
     """
-    global _loaded, _plugin_manager, _plugin_tts_handlers, _plugin_ui_handlers, _plugin_dag_node_factories, _plugin_dag_yaml_paths
+    global _loaded, _plugin_manager, _plugin_tts_handlers, _plugin_ui_handlers
+    global _plugin_dag_yaml_paths
+    global _plugin_workflow_contributions, _plugin_output_contract_patches
     if _loaded:
         return _plugin_manager
 
@@ -135,15 +153,20 @@ def ensure_plugins_loaded(config: ConfigManager | None = None) -> PluginManager 
         _plugin_tts_handlers = []
         _plugin_ui_handlers = []
     try:
-        _plugin_dag_node_factories = mgr.collect_dag_node_factories()
-    except Exception:
-        logger.exception("collect_dag_node_factories failed")
-        _plugin_dag_node_factories = []
-    try:
         _plugin_dag_yaml_paths = mgr.collect_dag_yaml_paths()
     except Exception:
         logger.exception("collect_dag_yaml_paths failed")
         _plugin_dag_yaml_paths = []
+    try:
+        _plugin_workflow_contributions = mgr.collect_workflow_contributions()
+    except Exception:
+        logger.exception("collect_workflow_contributions failed")
+        _plugin_workflow_contributions = []
+    try:
+        _plugin_output_contract_patches = mgr.collect_output_contract_patches()
+    except Exception:
+        logger.exception("collect_output_contract_patches failed")
+        _plugin_output_contract_patches = []
 
     _plugin_manager = mgr
     _loaded = True
@@ -202,6 +225,28 @@ def collect_tools_tab_contributions() -> List["ToolsTabContribution"]:
         return mgr.collect_tools_tab_contributions()
     except Exception:
         logger.exception("collect_tools_tab_contributions failed")
+        return []
+
+
+def collect_frontend_config_contributions() -> List["FrontendConfigContribution"]:
+    mgr = _plugin_manager
+    if mgr is None:
+        return []
+    try:
+        return mgr.collect_frontend_config_contributions()
+    except Exception:
+        logger.exception("collect_frontend_config_contributions failed")
+        return []
+
+
+def collect_frontend_page_contributions() -> List["FrontendPageContribution"]:
+    mgr = _plugin_manager
+    if mgr is None:
+        return []
+    try:
+        return mgr.collect_frontend_page_contributions()
+    except Exception:
+        logger.exception("collect_frontend_page_contributions failed")
         return []
 
 
